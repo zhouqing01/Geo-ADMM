@@ -58,17 +58,10 @@ def decompose_latent_frequency_torch(latents, kernel_size=5, sigma=1.0):
     return low, high
 
 
-# ========== 在文件顶部，类定义之前添加 ==========
-
 def depth_to_normal(depth_map):
-    """
-    从深度图计算法向图
-    输入: depth_map [B, 1, H, W]
-    输出: normal_map [B, 3, H, W] (归一化后的法向，范围 -1~1)
-    """
+
     B, C, H, W = depth_map.shape
     
-    # Sobel 算子计算梯度
     kernel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], 
                             device=depth_map.device, dtype=depth_map.dtype).view(1, 1, 3, 3)
     kernel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], 
@@ -76,24 +69,14 @@ def depth_to_normal(depth_map):
     
     dx = F.conv2d(depth_map, kernel_x, padding=1)
     dy = F.conv2d(depth_map, kernel_y, padding=1)
-    
-    # 构造法向向量 (-dx, -dy, 1) 并归一化
+
     normal = torch.cat((-dx, -dy, torch.ones_like(depth_map)), dim=1)
     normal = F.normalize(normal, dim=1)
     
     return normal
 
 def depth_to_normal_colored(depth_map, alpha_mask=None):
-    """
-    从深度图计算彩色法向图（标准 Normal Map 风格）
-    
-    输入: 
-        depth_map: [B, 1, H, W] 或 [1, H, W]
-        alpha_mask: [B, 1, H, W] 或 [1, H, W]，用于 mask 背景
-    输出: 
-        normal_rgb: [B, 3, H, W], 范围 0~1
-    """
-    # 处理维度
+
     if depth_map.dim() == 3:
         depth_map = depth_map.unsqueeze(0)
     if alpha_mask is not None and alpha_mask.dim() == 3:
@@ -102,12 +85,10 @@ def depth_to_normal_colored(depth_map, alpha_mask=None):
     B, C, H, W = depth_map.shape
     device, dtype = depth_map.device, depth_map.dtype
     
-    # 1. 归一化 depth（关键！让梯度在合理范围内）
     depth_min = depth_map.min()
     depth_max = depth_map.max()
     depth_norm = (depth_map - depth_min) / (depth_max - depth_min + 1e-8)
     
-    # 2. Sobel 算子计算梯度
     kernel_x = torch.tensor([[-1, 0, 1], 
                               [-2, 0, 2], 
                               [-1, 0, 1]], device=device, dtype=dtype).view(1, 1, 3, 3)
@@ -117,29 +98,23 @@ def depth_to_normal_colored(depth_map, alpha_mask=None):
     
     dx = F.conv2d(F.pad(depth_norm, (1,1,1,1), mode='replicate'), kernel_x)
     dy = F.conv2d(F.pad(depth_norm, (1,1,1,1), mode='replicate'), kernel_y)
-    
-    # 3. 调整梯度强度（这个参数很关键！）
-    # 值越大，法向变化越明显（颜色更丰富）
-    gradient_scale = 2.0  # 可以尝试 1.0 ~ 5.0
+
+    gradient_scale = 2.0 
     dx = dx * gradient_scale
     dy = dy * gradient_scale
     
-    # 4. 构造法向向量 n = (-dx, -dy, 1)
     normal_x = -dx
     normal_y = -dy
     normal_z = torch.ones_like(dx)
     
-    normal = torch.cat([normal_x, normal_y, normal_z], dim=1)  # [B, 3, H, W]
-    
-    # 5. 归一化
+    normal = torch.cat([normal_x, normal_y, normal_z], dim=1)
+
     normal = F.normalize(normal, dim=1, eps=1e-6)
-    
-    # 6. 映射到 RGB 颜色空间: [-1, 1] -> [0, 1]
+
     normal_rgb = (normal + 1.0) * 0.5
-    
-    # 7. 用 alpha mask 把背景变黑
+
     if alpha_mask is not None:
-        # 二值化 alpha（阈值处理）
+
         alpha_binary = (alpha_mask > 0.5).float()
         normal_rgb = normal_rgb * alpha_binary
     
@@ -147,13 +122,9 @@ def depth_to_normal_colored(depth_map, alpha_mask=None):
 
 
 def get_clean_normal(pred_normal):
-    """
-    使用双边滤波对法向图去噪
-    输入: [B, 3, H, W], 范围 -1~1
-    输出: [B, 3, H, W], 去噪后的法向图
-    """
+
     normal_np = pred_normal.detach().permute(0, 2, 3, 1).cpu().numpy()
-    # 映射到 0-255
+
     normal_np = ((normal_np + 1) * 0.5 * 255).clip(0, 255).astype(np.uint8)
     
     clean_np = np.zeros_like(normal_np)
@@ -161,55 +132,31 @@ def get_clean_normal(pred_normal):
         clean_np[b] = cv2.bilateralFilter(normal_np[b], d=5, sigmaColor=75, sigmaSpace=75)
     
     clean_normal = torch.from_numpy(clean_np).to(pred_normal.device).float() / 255.0
-    clean_normal = (clean_normal * 2) - 1  # 映射回 -1~1
+    clean_normal = (clean_normal * 2) - 1 
     return clean_normal.permute(0, 3, 1, 2)
 
 
 def normal_to_rgb(normal):
-    """
-    将法向图转换为可视化的 RGB 图像
-    输入: normal [B, 3, H, W], 范围 -1~1
-    输出: rgb [B, 3, H, W], 范围 0~1
-    """
-    # 标准法向可视化：(normal + 1) / 2
-    # X: 红色通道, Y: 绿色通道, Z: 蓝色通道
+
     rgb = (normal + 1) * 0.5
     return rgb.clamp(0, 1)
 
 def normal_to_grayscale(normal):
-    """
-    将法向图转换为灰度可视化（类似深度图效果）
-    
-    输入: normal [B, 3, H, W], 范围 -1~1
-    输出: gray [B, 1, H, W], 范围 0~1
-    
-    原理: 取 Z 分量，表示"朝向相机的程度"
-          Z 越大（越朝向相机）越亮
-    """
-    # 取 Z 分量 (第三个通道)
+
     z_component = normal[:, 2:3, :, :]  # [B, 1, H, W]
     
-    # 映射到 0~1 (原本 -1~1)
     gray = (z_component + 1) * 0.5
     
     return gray.clamp(0, 1)
 
 
 def visualize_tensor_as_grayscale(tensor, normalize=True):
-    """
-    通用的灰度可视化函数
-    
-    输入: tensor [B, C, H, W]
-    输出: gray [B, 1, H, W], 范围 0~1
-    """
-    # 取所有通道的均值
     if tensor.shape[1] > 1:
         gray = tensor.mean(dim=1, keepdim=True)
     else:
         gray = tensor
     
     if normalize:
-        # 归一化到 0~1
         min_val = gray.min()
         max_val = gray.max()
         gray = (gray - min_val) / (max_val - min_val + 1e-8)
@@ -235,8 +182,7 @@ class SpecifyGradient(torch.autograd.Function):
 def seed_everything(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    #torch.backends.cudnn.deterministic = True
-    #torch.backends.cudnn.benchmark = True
+
 
 class StableDiffusion(nn.Module):
     def __init__(self, device, fp16, vram_O, t_range=[0.02, 0.98], max_t_range=0.98, num_train_timesteps=None, 
@@ -499,52 +445,28 @@ class StableDiffusion(nn.Module):
 
         grad = w(self.alphas[t]) * (pred_noise - target)
         
-        # =======================================================
-        # [核心修改] Latent 梯度频域解耦 (Gradient Frequency Split)
-        # =======================================================
-        
-        # 1. 分解梯度：算出 SDS 梯度的低频部分 (代表大的几何趋势)
         grad_low, grad_high = self.decompose_latent_frequency(grad, kernel_size=5, opt_params=guidance_opt)
         # grad_low, grad_high = decompose_latent_frequency_torch(grad, kernel_size=5, sigma=1.0)
         
         grad_high = grad_high * 2.0
         
-        # 2. 抑制 SDS 的低频破坏力
-        # 策略 A: 硬截断。如果当前的 timestep 比较大（前期），我们极度不信任 SDS 的几何
-        # 策略 B: 软缩放。将低频梯度缩小 0.2 倍，给 ADMM 留出 80% 的话语权
-        # (0.0, 0.2)
         current_t_val = t.item()
-        # if current_t_val > 600:
-        #     sds_low_freq_scale = 0.5  # 绝对禁言
-        # else:
-        #     sds_low_freq_scale = 1.0  # 允许微调
-            
+
         if current_t_val > 500:
-            sds_low_freq_scale = 0.1  # 高噪声时刻：强烈抑制（保护几何）
+            sds_low_freq_scale = 0.1 
         elif current_t_val > 200:
-            sds_low_freq_scale = 0.3  # 中等噪声：适度抑制
+            sds_low_freq_scale = 0.3
         else:
-            sds_low_freq_scale = 0.6  # 低噪声时刻：放松限制（允许纹理精修）
-        
-        # sds_low_freq_scale = 0.2  # 这个参数决定了你跟 Benchmark 的差距有多大！
-        #                         # 越小，几何越受 ADMM/几何约束控制，越平滑。
+            sds_low_freq_scale = 0.6 
         
         grad_modified = grad_high + grad_low * sds_low_freq_scale
         
-        # 3. 梯度归一化 (可选，防止梯度爆炸掩盖 ADMM)
-        # 限制 SDS 梯度的最大模长，确保它不会比 ADMM 梯度大几个数量级
-        max_grad_norm = 100 # （1.1，1.2为100，1.3为20，1.4为100）
         grad_norm = torch.norm(grad_modified, dim=1, keepdim=True)
         grad_modified = grad_modified * torch.minimum(torch.ones_like(grad_norm), max_grad_norm / (grad_norm + 1e-8)) # * grad_scale
         grad_modified = torch.nan_to_num(grad_scale * grad_modified)
-        # =======================================================
 
-        # 将修改后的梯度传给 SpecifyGradient
-        # 注意：这里我们传 grad_modified，而不是原始的 grad
         loss = SpecifyGradient.apply(latents, grad_modified)
-            
-        # grad = torch.nan_to_num(grad_scale * grad)
-        # loss = SpecifyGradient.apply(latents, grad)
+
 
         if iteration % guidance_opt.vis_interval == 0:
             noise_pred_post = noise_pred_uncond + guidance_opt.guidance_scale * delta_DSD    
@@ -553,25 +475,17 @@ class StableDiffusion(nn.Module):
             with torch.no_grad():
                 d_raw = pred_depth.detach()
                 a_raw = pred_alpha.detach()
-                
-                # 2. 深度图增强逻辑 (消除白边 + 层次拉伸)
-                # 动态阈值：取当前视角 alpha 最大值的 50%
                 max_a = a_raw.max()
                 thresh = max_a * 0.5
                 mask = a_raw > thresh
                 
                 if mask.any():
-                    # 锁定物体核心区域的深度范围
+
                     obj_d = d_raw[mask]
-                    v_min = torch.quantile(obj_d, 0.05) # 排除离群点
+                    v_min = torch.quantile(obj_d, 0.05)
                     v_max = torch.quantile(obj_d, 0.95)
-                    
-                    # 线性拉伸并反转 (让近处白，远处黑)
-                    # 如果你想要原样，就用 (d_raw - v_min) / (v_max - v_min)
                     enhanced_depth = (v_max - d_raw) / (v_max - v_min + 1e-7)
                     enhanced_depth = torch.clamp(enhanced_depth, 0.0, 1.0)
-                    
-                    # 消除白边：乘以 alpha 的权重消融
                     alpha_s = torch.clamp((a_raw - thresh) / (max_a - thresh + 1e-7), 0, 1)
                     enhanced_depth = enhanced_depth * alpha_s
                     enhanced_depth[~mask] = 0
@@ -599,84 +513,11 @@ class StableDiffusion(nn.Module):
                                         pred_x0_sp, pred_x0_pos],dim=0) 
                 save_image(viz_images, save_path_iter)
                 
-        # if iteration % guidance_opt.vis_interval == 0:
-        #     noise_pred_post = noise_pred_uncond + guidance_opt.guidance_scale * delta_DSD    
-        #     lat2rgb = lambda x: torch.clip((x.permute(0,2,3,1) @ self.rgb_latent_factors.to(x.dtype)).permute(0,3,1,2), 0., 1.)
-        #     save_path_iter = os.path.join(save_folder,"iter_{}_step_{}.jpg".format(iteration,prev_t.item()))
-            
-        #     with torch.no_grad():
-        #         # --- 1. 原有的 Latent 解码 ---
-        #         pred_x0_latent_sp = pred_original(self.scheduler, noise_pred_uncond, prev_t, prev_latents_noisy)    
-        #         pred_x0_latent_pos = pred_original(self.scheduler, noise_pred_post, prev_t, prev_latents_noisy)        
-        #         pred_x0_pos = self.decode_latents(pred_x0_latent_pos.type(self.precision_t))
-        #         pred_x0_sp = self.decode_latents(pred_x0_latent_sp.type(self.precision_t))
-
-        #         # --- Helper: 定义一个快速画热力图的函数 ---
-        #         def get_heatmap(gradient_tensor):
-        #             if gradient_tensor is None: 
-        #                 return torch.zeros_like(pred_rgb) # 用于占位
-        #             g_abs = torch.abs(gradient_tensor.detach())
-        #             # 归一化到 0-1 方便观看
-        #             g_norm = (g_abs / (g_abs.max() + 1e-8)).mean(dim=1, keepdim=True)
-        #             return F.interpolate(g_norm, (resolution[0], resolution[1]), mode='bilinear', align_corners=False).repeat(1,3,1,1)
-
-        #         # --- 2. [关键新增] 梯度分量可视化 ---
-        #         # A. 总梯度 (你原来的 norm_grad)
-        #         viz_total_grad = get_heatmap(grad) 
-                
-        #         # B. 低频梯度 (SDS 想要怎么改几何) -> 论文图表素材!
-        #         viz_low_freq = get_heatmap(grad_low)
-                
-        #         # C. 高频梯度 (SDS 想要怎么改纹理)
-        #         viz_high_freq = get_heatmap(grad_high)
-                
-        #         # D. 被抑制的梯度 (SDS 想做但被我们禁止的操作) -> Janus Killer 的证据!
-        #         # 只有当 scaling < 1.0 时才有意义
-        #         viz_suppressed = get_heatmap((grad - grad_modified))
-
-        #         # E. ADMM 外部力 (如果存在) -> 展示几何约束在哪里生效
-        #         viz_admm_force = get_heatmap(admm_external_force) if admm_external_force is not None else torch.zeros_like(pred_rgb)
-
-        #         # --- 3. Latent RGB 预览 ---
-        #         latents_rgb = F.interpolate(lat2rgb(latents), (resolution[0], resolution[1]), mode='bilinear', align_corners=False)
-        #         latents_sp_rgb = F.interpolate(lat2rgb(pred_x0_latent_sp), (resolution[0], resolution[1]), mode='bilinear', align_corners=False)
-
-        #         # --- 4. 拼图 (Rows: 渲染 / 预测 / 梯度分析) ---
-        #         # 建议分两行或三行，逻辑更清晰
-                
-        #         # Row 1: 现状 (RGB, Depth, Alpha, Latent)
-        #         row1 = torch.cat([pred_rgb, pred_depth.repeat(1, 3, 1, 1), pred_alpha.repeat(1, 3, 1, 1), latents_rgb], dim=0)
-                
-        #         # Row 2: 预测 (X0_Pos: SDS想要的样子, X0_SP:原本的样子)
-        #         row2 = torch.cat([pred_x0_pos, pred_x0_sp, latents_sp_rgb, torch.zeros_like(pred_rgb)], dim=0) # 补一个空位对齐
-                
-        #         # Row 3: [Paper Highlights] 梯度分析
-        #         # 顺序: 低频(几何) | 高频(纹理) | 被抑制(Janus) | ADMM力(修正)
-        #         row3 = torch.cat([viz_low_freq, viz_high_freq, viz_suppressed, viz_admm_force], dim=0)
-
-        #         # 最终拼接
-        #         viz_images = torch.cat([row1, row2, row3], dim=1) # 注意：这里为了方便看，改成 dim=1 横向拼可能会太长，建议先 cat row 再 cat dim=0
-                
-        #         # 修正拼接逻辑 (按你原来的 dim=0 竖着拼，但建议每行 4 张图)
-        #         # 假设 B=1，我们手动拼成网格：
-        #         # [ RGB  | Depth | Alpha | Latent ]
-        #         # [ Pred | Low   | High  | ADMM   ]
-                
-        #         final_grid = torch.cat([
-        #             torch.cat([pred_rgb, pred_depth.repeat(1,3,1,1), pred_alpha.repeat(1,3,1,1), latents_rgb], dim=3), # Row 1
-        #             torch.cat([pred_x0_pos, viz_low_freq, viz_high_freq, viz_admm_force], dim=3)      # Row 2 (核心分析)
-        #         ], dim=2)
-
-        #         save_image(final_grid, save_path_iter)
-                
                 
         with torch.no_grad():
-            # 计算各种模长 (Norm)
-            raw_grad_norm = grad.norm().item()         # 原始 SDS 梯度的总力度
-            low_freq_norm = grad_low.norm().item()     # 低频（几何）部分的力度
-            high_freq_norm = grad_high.norm().item()   # 高频（纹理）部分的力度
-            
-            # 计算低频占比 (如果这个值很高，说明 SDS 还在疯狂修改几何)
+            raw_grad_norm = grad.norm().item()
+            low_freq_norm = grad_low.norm().item()     
+            high_freq_norm = grad_high.norm().item()   
             low_freq_ratio = low_freq_norm / (raw_grad_norm + 1e-8)
 
         monitor_dict = {
@@ -698,11 +539,8 @@ class StableDiffusion(nn.Module):
             low_freq_ratio = low_freq_norm / (raw_grad_norm + 1e-8)
             
             if admm_external_force is not None:
-                # 如果传进来了 ADMM 力，红线就是 ADMM 力度的 Std
-                # 这代表：ADMM 这一步用了多大的力气来纠正几何
                 admm_control_std = admm_external_force.std().item()
             else:
-                # 前期没有 ADMM，红线归零
                 admm_control_std = 0.0
 
             monitor_dict = {
@@ -712,14 +550,11 @@ class StableDiffusion(nn.Module):
                 "sds_high": high_freq_norm,
                 "low_ratio": low_freq_ratio,
                 "timestep": t.item(),
-                
-                # [新增] 画图专用数据 (记录 Mean 值以观察方向)
-                "score_std": raw_sds_scaled.std().item(),     # 蓝线: 原始 SDS 的混乱程度
-                "control_std": control_variate.std().item(),  # 红线: 我们移除的混乱程度
+                "score_std": raw_sds_scaled.std().item(),
+                "control_std": control_variate.std().item(),
                 "admm_control_std": admm_control_std,
-                
-                "score_mean": raw_sds_scaled.mean().item(),     # 蓝线数据 (Score)
-                "control_mean": correction.mean().item()     # 红线数据 (Control Variate)
+                "score_mean": raw_sds_scaled.mean().item(),
+                "control_mean": correction.mean().item()
             }
 
         return loss, monitor_dict
@@ -742,7 +577,6 @@ class StableDiffusion(nn.Module):
                 latents,_ = self.encode_imgs(pred_depth.repeat(1,3,1,1).to(self.precision_t))
             else:
                 latents,_ = self.encode_imgs(pred_rgb.to(self.precision_t))
-        # timestep ~ U(0.02, 0.98) to avoid very high/low noise level
 
         if self.noise_temp is None:
             self.noise_temp = torch.randn((latents.shape[0], 4, resolution[0] // 8, resolution[1] // 8, ), dtype=latents.dtype, device=latents.device, generator=self.noise_gen) + 0.1 * torch.randn((1, 4, 1, 1), device=latents.device).repeat(latents.shape[0], 1, 1, 1)
@@ -769,20 +603,17 @@ class StableDiffusion(nn.Module):
         prev_t = self.timesteps[ind_prev_t]
 
         with torch.no_grad():
-            # step unroll via ddim inversion
             if not self.ism:
                 prev_latents_noisy = self.scheduler.add_noise(latents, noise, prev_t)
                 latents_noisy = self.scheduler.add_noise(latents, noise, t)
                 target = noise
             else:
-                # Step 1: sample x_s with larger steps
                 xs_delta_t = guidance_opt.xs_delta_t if guidance_opt.xs_delta_t is not None else current_delta_t
                 xs_inv_steps = guidance_opt.xs_inv_steps if guidance_opt.xs_inv_steps is not None else int(np.ceil(ind_prev_t / xs_delta_t))
                 starting_ind = max(ind_prev_t - xs_delta_t * xs_inv_steps, torch.ones_like(ind_t) * 0)
 
                 _, prev_latents_noisy, pred_scores_xs = self.add_noise_with_cfg(latents, noise, ind_prev_t, starting_ind, inverse_text_embeddings, 
                                                                                 guidance_opt.denoise_guidance_scale, xs_delta_t, xs_inv_steps, eta=guidance_opt.xs_eta)
-                # Step 2: sample x_t
                 _, latents_noisy, pred_scores_xt = self.add_noise_with_cfg(prev_latents_noisy, noise, ind_t, ind_prev_t, inverse_text_embeddings, 
                                                                            guidance_opt.denoise_guidance_scale, current_delta_t, 1, is_noisy_latent=True)        
 
@@ -819,46 +650,26 @@ class StableDiffusion(nn.Module):
         w = lambda alphas: (((1 - alphas) / alphas) ** 0.5) 
     
         grad = w(self.alphas[t]) * (pred_noise - target)   
-        
-        # =======================================================
-        # [核心修改] Latent 梯度频域解耦 (Gradient Frequency Split)
-        # =======================================================
-        
-        # 1. 分解梯度：算出 SDS 梯度的低频部分 (代表大的几何趋势)
+
         grad_low, grad_high = self.decompose_latent_frequency(grad, kernel_size=5, opt_params=guidance_opt)
         # grad_low, grad_high = decompose_latent_frequency_torch(grad, kernel_size=5, sigma=1.0)
         grad_high = grad_high * 2.0
         
-        # 2. 抑制 SDS 的低频破坏力
-        # 策略 A: 硬截断。如果当前的 timestep 比较大（前期），我们极度不信任 SDS 的几何
-        # 策略 B: 软缩放。将低频梯度缩小 0.2 倍，给 ADMM 留出 80% 的话语权
-        
         current_t_val = t.item()
         if current_t_val > 400:
-            sds_low_freq_scale = 0.5  # 绝对禁言
+            sds_low_freq_scale = 0.5
         else:
-            sds_low_freq_scale = 1.0  # 允许微调
+            sds_low_freq_scale = 1.0
             
-        # sds_low_freq_scale = 0.2  # 这个参数决定了你跟 Benchmark 的差距有多大！
-        #                         # 越小，几何越受 ADMM/几何约束控制，越平滑。
-        
         grad_modified = grad_high + grad_low * sds_low_freq_scale
-        
-        # 3. 梯度归一化 (可选，防止梯度爆炸掩盖 ADMM)
-        # 限制 SDS 梯度的最大模长，确保它不会比 ADMM 梯度大几个数量级
+
         grad_norm = torch.norm(grad_modified, dim=1, keepdim=True)
         max_grad_norm = 100.0 # 100.0
         grad_modified = grad_modified * torch.minimum(torch.ones_like(grad_norm), max_grad_norm / (grad_norm + 1e-8)) # * grad_scale
         grad_modified = torch.nan_to_num(grad_scale * grad_modified)
-        # =======================================================
 
-        # 将修改后的梯度传给 SpecifyGradient
-        # 注意：这里我们传 grad_modified，而不是原始的 grad
         loss = SpecifyGradient.apply(latents, grad_modified)
 
-
-        # grad = torch.nan_to_num(grad_scale * grad)
-        # loss = SpecifyGradient.apply(latents, grad)
               
         if iteration % guidance_opt.vis_interval == 0:
             noise_pred_post = noise_pred_uncond + 7.5* delta_DSD    
@@ -867,32 +678,25 @@ class StableDiffusion(nn.Module):
             with torch.no_grad():
                 d_raw = pred_depth.detach()
                 a_raw = pred_alpha.detach()
-                
-                # 2. 深度图增强逻辑 (消除白边 + 层次拉伸)
-                # 动态阈值：取当前视角 alpha 最大值的 50%
+
                 max_a = a_raw.max()
                 thresh = max_a * 0.5
                 mask = a_raw > thresh
                 
                 if mask.any():
-                    # 锁定物体核心区域的深度范围
+
                     obj_d = d_raw[mask]
-                    v_min = torch.quantile(obj_d, 0.05) # 排除离群点
+                    v_min = torch.quantile(obj_d, 0.05)
                     v_max = torch.quantile(obj_d, 0.95)
-                    
-                    # 线性拉伸并反转 (让近处白，远处黑)
-                    # 如果你想要原样，就用 (d_raw - v_min) / (v_max - v_min)
                     enhanced_depth = (v_max - d_raw) / (v_max - v_min + 1e-7)
                     enhanced_depth = torch.clamp(enhanced_depth, 0.0, 1.0)
-                    
-                    # 消除白边：乘以 alpha 的权重消融
+
                     alpha_s = torch.clamp((a_raw - thresh) / (max_a - thresh + 1e-7), 0, 1)
                     enhanced_depth = enhanced_depth * alpha_s
                     enhanced_depth[~mask] = 0
                 else:
                     enhanced_depth = torch.zeros_like(d_raw)
 
-                # 3. 计算梯度可视化
                 grad_abs = torch.abs(grad.detach())
                 norm_grad = F.interpolate((grad_abs / grad_abs.max()).mean(dim=1,keepdim=True), (resolution[0], resolution[1]), mode='bilinear', align_corners=False).repeat(1,3,1,1)
                         
@@ -900,7 +704,7 @@ class StableDiffusion(nn.Module):
                 pred_x0_latent_pos = pred_original(self.scheduler, noise_pred_post, prev_t, prev_latents_noisy)        
                 pred_x0_pos = self.decode_latents(pred_x0_latent_pos.type(self.precision_t))
                 pred_x0_sp = self.decode_latents(pred_x0_latent_sp.type(self.precision_t))
-                # pred_x0_uncond = pred_x0_sp[:1, ...]
+
 
                 grad_abs = torch.abs(grad.detach())
                 norm_grad  = F.interpolate((grad_abs / grad_abs.max()).mean(dim=1,keepdim=True), (resolution[0], resolution[1]), mode='bilinear', align_corners=False).repeat(1,3,1,1)
@@ -930,11 +734,9 @@ class StableDiffusion(nn.Module):
             low_freq_ratio = low_freq_norm / (raw_grad_norm + 1e-8)
             
             if admm_external_force is not None:
-                # 如果传进来了 ADMM 力，红线就是 ADMM 力度的 Std
-                # 这代表：ADMM 这一步用了多大的力气来纠正几何
                 admm_control_std = admm_external_force.std().item()
             else:
-                # 前期没有 ADMM，红线归零
+
                 admm_control_std = 0.0
 
             monitor_dict = {
@@ -944,13 +746,11 @@ class StableDiffusion(nn.Module):
                 "sds_high": high_freq_norm,
                 "low_ratio": low_freq_ratio,
                 "timestep": t.item(),
-                
-                # [新增] 画图专用数据 (记录 Mean 值以观察方向)
-                "score_std": raw_sds_scaled.std().item(),     # 蓝线: 原始 SDS 的混乱程度
-                "control_std": control_variate.std().item(),  # 红线: 我们移除的混乱程度
+                "score_std": raw_sds_scaled.std().item(),
+                "control_std": control_variate.std().item(), 
                 "admm_control_std": admm_control_std,
-                "score_mean": raw_sds_scaled.mean().item(),     # 蓝线数据 (Score)
-                "control_mean": correction.mean().item()     # 红线数据
+                "score_mean": raw_sds_scaled.mean().item(),
+                "control_mean": correction.mean().item()
             }
 
         return loss, monitor_dict
@@ -966,7 +766,6 @@ class StableDiffusion(nn.Module):
 
     def encode_imgs(self, imgs):
         target_dtype = imgs.dtype
-        # imgs: [B, 3, H, W]
         imgs = 2 * imgs - 1
 
         posterior = self.vae.encode(imgs.to(self.vae.dtype)).latent_dist
@@ -976,88 +775,41 @@ class StableDiffusion(nn.Module):
 
         return latents.to(target_dtype), kl_divergence
     
-    # [新增] 频域分解工具
-    # def decompose_latent_frequency(self, latents, kernel_size=3):
-    #     """
-    #     将 Latent 正交分解为: z = z_low (结构/流形) + z_high (纹理/细节)
-    #     """
-    #     # 使用 AvgPool 模拟低通滤波
-    #     padding = kernel_size // 2
-    #     z_low = F.avg_pool2d(latents, kernel_size=kernel_size, stride=1, padding=padding)
-    #     z_high = latents - z_low
-    #     return z_low, z_high
-    
     def decompose_latent_frequency(self, latents, kernel_size=None, opt_params=None): 
-        """
-        [PnP-ADMM 升级版]
-        使用双边滤波 (Bilateral Filter) 代替简单的 AvgPool。
-        
-        物理含义:
-        z_low (Geometry) = 保持了边缘的平滑结构 (Edge-Preserving Smooth)
-        z_high (Noise)   = 被剔除的随机噪声
-        """
         device = latents.device
         dtype = latents.dtype
-        
-        # 1. 准备数据: Tensor (GPU) -> Numpy (CPU)
-        # latents shape: [B, 4, H, W]
         x_np = latents.detach().cpu().numpy()
         
         z_low_np = np.zeros_like(x_np)
-        
-        # 双边滤波参数 (经验值，可微调)
-        # d: 滤波直径 (对应 kernel_size)
-        # sigmaColor: 颜色空间标准差 (控制对边缘的敏感度，越大越模糊，越小越保边)
-        # sigmaSpace: 坐标空间标准差 (控制平滑范围)
+
         d = 5 
-        sigmaColor = 0.05  # Latent 归一化后通常在 -2~2 之间，0.1 是个合理的边缘阈值
+        sigmaColor = 0.05
         sigmaSpace = 5.0
         
         filter_type = getattr(opt_params, "pnp_filter_type", "bilateral")
-        
-        # 2. 对每个 Sample 和 Channel 单独做滤波
-        # OpenCV 不支持 4D 数组，必须循环处理
+
         for b in range(x_np.shape[0]):
             for c in range(x_np.shape[1]):
                 img = x_np[b, c]
-                
-                # [核心] Bilateral Filter: 只磨平噪声，不磨平边缘
-                # 注意: img 必须是 float32
+
                 if filter_type == 'gaussian':
-                    # 强力平滑，用于对比细节丢失
                     z_low_np[b, c] = cv2.GaussianBlur(img.astype(np.float32), (d, d), 0)
                 elif filter_type == 'median':
-                    # 中值滤波，用于对比对畸形突出的抑制
                     z_low_np[b, c] = cv2.medianBlur(img.astype(np.float32), d)
                 else: 
                     filtered = cv2.bilateralFilter(img.astype(np.float32), d=d, sigmaColor=sigmaColor, sigmaSpace=sigmaSpace)
                     z_low_np[b, c] = filtered
 
-        # 3. 转回 Tensor
         z_low = torch.from_numpy(z_low_np).to(device=device, dtype=dtype)
-        
-        # 4. 计算残差 (即 High Frequency / Noise)
-        # 这一部分就是会被 ADMM 抑制掉的"多头"和"噪点"
         z_high = latents - z_low
         
         return z_low, z_high
     
 
-    # [新增 2/2] MBIR 近邻算子 (即 ADMM 的 Z-step)
     def apply_latent_mbir_prox(self, noisy_input, target_low_freq, alpha=0.5):
-        """
-        求解 Z-step: min_z ||z - noisy_input||^2 + Constraint(z)
-        noisy_input: 对应 ADMM 中的 (x + u)
-        target: 对应几何流形的目标 (如 Batch 均值)
-        alpha: 投影强度 (对应 rho/(rho+lambda))
-        """
         z_low, z_high = self.decompose_latent_frequency(noisy_input)
-        # z_low, z_high = decompose_latent_frequency_torch(noisy_input, kernel_size=5, sigma=1.0)
-        
-        # Proximal Update: 低频部分向目标收缩
         z_low_new = (1 - alpha) * z_low + alpha * target_low_freq
-        
-        # 重组: 保持高频部分不变 (因为我们只约束了低频流形)
+
         z_new = z_low_new + z_high
         return z_new
     
